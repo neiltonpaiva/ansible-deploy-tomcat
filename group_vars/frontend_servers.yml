@@ -1,0 +1,11 @@
+# Configurações específicas dos servidores frontend
+max_heap_size: "2048m"
+min_heap_size: "1024m"
+
+# Configurações de monitoramento
+monitoring_enabled: true
+log_aggregation: true
+
+# Configurações de backup específicas
+backup_before_deploy: true
+backup_compress: true

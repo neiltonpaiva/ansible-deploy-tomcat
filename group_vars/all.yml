@@ -1,0 +1,39 @@
+# Configurações globais do ambiente
+tomcat_home: "/opt/tomcat/current"
+tomcat_user: "tomcat"
+tomcat_service: "tomcat"
+tomcat_port: 8080
+
+# Diretórios de aplicação
+app_directories:
+  webapps: "{{ tomcat_home }}/webapps"
+  datasul_report: "{{ tomcat_home }}/Datasul-report"
+  lib: "{{ tomcat_home }}/lib"
+
+# Diretórios a preservar durante updates de versão
+preserve_directories:
+  - "{{ tomcat_home }}/webapps/custom"
+
+# URLs para health check
+health_check:
+  local_url: "https://{{ ansible_default_ipv4.address }}:{{ tomcat_port }}/totvs-menu"
+  load_balancer_url: "https://gp.unimedrj.coop.br/totvs-menu"
+
+# Backup configuration
+backup_base_dir: "/opt/backups/tomcat"
+backup_retention_days: 30
+
+# FSx mount point
+fsx_mount: "/mnt/ansible"
+
+# Deploy configuration
+deploy_timeout: 600  # 10 minutos
+health_check_retries: 15
+health_check_delay: 20
+
+# Log monitoring
+tomcat_log_file: "{{ tomcat_home }}/logs/catalina.out"
+deployment_success_patterns:
+  - "Server startup"
+  - "Deployment of web application"
+  - "started successfully"

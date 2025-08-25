@@ -1,0 +1,204 @@
+---
+- name: "Deploy Version Updates (webapps, Datasul-report, lib)"
+  hosts: frontend_servers
+  serial: 1  # Um servidor por vez para updates de versão
+  gather_facts: yes
+  vars:
+    deploy_timestamp: "{{ ansible_date_time.epoch }}"
+    deploy_date: "{{ ansible_date_time.date }}"
+    update_source: "{{ fsx_mount }}/staging"
+    
+  pre_tasks:
+    - name: "Validar sources dos updates"
+      stat:
+        path: "{{ update_source }}/{{ item }}"
+      register: version_sources
+      loop:
+        - webapps
+        - Datasul-report
+        - lib
+      delegate_to: localhost
+      run_once: true
+      
+    - name: "Verificar se todos os sources existem"
+      fail:
+        msg: "Source não encontrado: {{ update_source }}/{{ item.item }}"
+      loop: "{{ version_sources.results }}"
+      when: not item.stat.exists
+      delegate_to: localhost
+      run_once: true
+
+    - name: "Confirmação de deploy de versão"
+      pause:
+        prompt: |
+          ==========================================
+          ATENÇÃO: DEPLOY DE VERSÃO COMPLETA
+          ==========================================
+          Servidor: {{ inventory_hostname }}
+          
+          Diretórios que serão atualizados:
+          - {{ tomcat_home }}/webapps
+          - {{ tomcat_home }}/Datasul-report  
+          - {{ tomcat_home }}/lib
+          
+          Diretórios preservados:
+          - {{ tomcat_home }}/webapps/custom
+          
+          Continuar? (Ctrl+C para cancelar)
+      when: inventory_hostname == play_hosts[0]  # Só pergunta uma vez
+
+  tasks:
+    - name: "Criar diretório de backup para versão"
+      file:
+        path: "{{ backup_base_dir }}/version/{{ deploy_date }}"
+        state: directory
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+        mode: '0755'
+      become: yes
+
+    - name: "Parar Tomcat para update de versão"
+      systemd:
+        name: "{{ tomcat_service }}"
+        state: stopped
+      become: yes
+      
+    - name: "Aguardar Tomcat parar completamente"
+      wait_for:
+        port: "{{ tomcat_port }}"
+        state: stopped
+        timeout: 120
+
+    - name: "Backup completo da versão atual"
+      shell: |
+        cd {{ tomcat_home }}
+        tar -czf {{ backup_base_dir }}/version/{{ deploy_date }}/{{ inventory_hostname }}_full_backup_{{ deploy_timestamp }}.tar.gz \
+          webapps Datasul-report lib
+      become: yes
+      
+    - name: "Backup específico do diretório custom"
+      shell: |
+        if [ -d "{{ tomcat_home }}/webapps/custom" ]; then
+          cd {{ tomcat_home }}/webapps
+          tar -czf {{ backup_base_dir }}/version/{{ deploy_date }}/{{ inventory_hostname }}_custom_{{ deploy_timestamp }}.tar.gz custom/
+          echo "Custom backup criado"
+        else
+          echo "Diretório custom não existe"
+        fi
+      become: yes
+      register: custom_backup
+      
+    - name: "Limpar diretórios atuais (preservando custom)"
+      shell: |
+        # Preservar custom temporariamente
+        if [ -d "{{ tomcat_home }}/webapps/custom" ]; then
+          mv {{ tomcat_home }}/webapps/custom /tmp/custom_temp_{{ deploy_timestamp }}
+        fi
+        
+        # Limpar diretórios
+        rm -rf {{ tomcat_home }}/webapps/*
+        rm -rf {{ tomcat_home }}/Datasul-report/*
+        rm -rf {{ tomcat_home }}/lib/*
+      become: yes
+      
+    - name: "Atualizar webapps"
+      synchronize:
+        src: "{{ update_source }}/webapps/"
+        dest: "{{ tomcat_home }}/webapps/"
+        delete: yes
+        rsync_opts:
+          - "--chown={{ tomcat_user }}:{{ tomcat_user }}"
+      become: yes
+      
+    - name: "Atualizar Datasul-report"
+      synchronize:
+        src: "{{ update_source }}/Datasul-report/"
+        dest: "{{ tomcat_home }}/Datasul-report/"
+        delete: yes
+        rsync_opts:
+          - "--chown={{ tomcat_user }}:{{ tomcat_user }}"
+      become: yes
+      
+    - name: "Atualizar lib"
+      synchronize:
+        src: "{{ update_source }}/lib/"
+        dest: "{{ tomcat_home }}/lib/"
+        delete: yes
+        rsync_opts:
+          - "--chown={{ tomcat_user }}:{{ tomcat_user }}"
+      become: yes
+      
+    - name: "Restaurar diretório custom"
+      shell: |
+        if [ -d "/tmp/custom_temp_{{ deploy_timestamp }}" ]; then
+          mv /tmp/custom_temp_{{ deploy_timestamp }} {{ tomcat_home }}/webapps/custom
+          chown -R {{ tomcat_user }}:{{ tomcat_user }} {{ tomcat_home }}/webapps/custom
+          echo "Custom restaurado com sucesso"
+        else
+          echo "Nenhum custom para restaurar"
+        fi
+      become: yes
+      register: custom_restore
+      
+    - name: "Definir permissões finais"
+      file:
+        path: "{{ item }}"
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+        mode: '0755'
+        recurse: yes
+      loop:
+        - "{{ tomcat_home }}/webapps"
+        - "{{ tomcat_home }}/Datasul-report"
+        - "{{ tomcat_home }}/lib"
+      become: yes
+      
+    - name: "Iniciar Tomcat após update de versão"
+      systemd:
+        name: "{{ tomcat_service }}"
+        state: started
+        enabled: yes
+      become: yes
+      
+    - name: "Aguardar inicialização completa (versão nova pode demorar mais)"
+      wait_for:
+        port: "{{ tomcat_port }}"
+        timeout: 900  # 15 minutos para versão nova
+        
+    - name: "Monitorar logs de inicialização"
+      shell: |
+        timeout 600 tail -f {{ tomcat_log_file }} | while read line; do
+          echo "$line"
+          echo "$line" | grep -q "Server startup" && break
+        done 2>/dev/null || echo "Timeout aguardando startup completo"
+      become: yes
+      register: startup_monitoring
+      
+    - name: "Health check extensivo para nova versão"
+      uri:
+        url: "https://{{ ansible_default_ipv4.address }}:{{ tomcat_port }}/totvs-menu"
+        method: GET
+        status_code: [200, 302, 301]
+        timeout: 60
+        validate_certs: no
+      register: version_health_check
+      retries: 20
+      delay: 30
+      ignore_errors: yes
+      
+    - name: "Relatório de deploy de versão"
+      debug:
+        msg: |
+          ===============================================
+          DEPLOY DE VERSÃO COMPLETO - {{ inventory_hostname }}
+          ===============================================
+          Backup Completo: {{ backup_base_dir }}/version/{{ deploy_date }}/{{ inventory_hostname }}_full_backup_{{ deploy_timestamp }}.tar.gz
+          Custom Preservado: {{ 'SIM' if custom_restore.stdout is search('sucesso') else 'N/A' }}
+          Health Check: {{ 'OK' if version_health_check.status == 200 else 'NECESSITA VERIFICAÇÃO' }}
+          Timestamp: {{ deploy_timestamp }}
+          
+          Próximos passos:
+          1. Testar funcionalidades principais
+          2. Verificar logs para warnings
+          3. Validar integração com load balancer
+          ===============================================

@@ -1,0 +1,56 @@
+# upload-to-fsx.ps1
+param(
+    [Parameter(Mandatory=$true)]
+    [ValidateSet("war", "version")]
+    [string]$UpdateType,
+    
+    [Parameter(Mandatory=$true)]
+    [string]$SourcePath
+)
+
+$FSxPath = "U:\updates"  # Drive mapeado para FSx
+$Timestamp = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+
+Write-Host "=== FSx Deploy Pipeline ===" -ForegroundColor Green
+
+# Verificar conectividade FSx
+if (!(Test-Path $FSxPath)) {
+    Write-Error "FSx não acessível. Verificar conexão."
+    exit 1
+}
+
+# Estrutura otimizada
+$StagingPath = "$FSxPath\staging\$UpdateType-$Timestamp"
+New-Item -Path $StagingPath -ItemType Directory -Force
+
+# Copy otimizada para FSx
+Write-Host "📁 Copiando para FSx (alta performance)..." -ForegroundColor Yellow
+
+# Usar robocopy com configurações para FSx
+robocopy $SourcePath $StagingPath /E /COPYALL /R:2 /W:5 /MT:16 /XD ".git" "temp"
+
+if ($LASTEXITCODE -le 1) {
+    # Criar trigger estruturado  
+    $TriggerPath = "$FSxPath\triggers"
+    New-Item -Path $TriggerPath -ItemType Directory -Force
+    
+    $TriggerData = @{
+        UpdateType = $UpdateType
+        StagingPath = "staging/$UpdateType-$Timestamp"
+        Timestamp = $Timestamp
+        User = $env:USERNAME
+        Machine = $env:COMPUTERNAME
+        Size = (Get-ChildItem $StagingPath -Recurse | Measure-Object -Property Length -Sum).Sum
+        FileCount = (Get-ChildItem $StagingPath -Recurse -File).Count
+        Status = "ready"
+    }
+    
+    $TriggerData | ConvertTo-Json | Out-File "$TriggerPath\$UpdateType-$Timestamp.json" -Encoding UTF8
+    
+    Write-Host "✅ Pronto para deploy!" -ForegroundColor Green
+    Write-Host "   Path: $($TriggerData.StagingPath)" -ForegroundColor Cyan
+    Write-Host "   Size: $([math]::Round($TriggerData.Size / 1MB, 2)) MB" -ForegroundColor Cyan
+    Write-Host "   Files: $($TriggerData.FileCount)" -ForegroundColor Cyan
+} else {
+    Write-Error "Falha na cópia. Código: $LASTEXITCODE"
+}

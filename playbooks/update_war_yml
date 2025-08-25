@@ -1,0 +1,166 @@
+---
+- name: "Deploy WAR Updates"
+  hosts: frontend_servers
+  serial: 2  # Processa 2 servidores por vez
+  gather_facts: yes
+  vars:
+    deploy_timestamp: "{{ ansible_date_time.epoch }}"
+    deploy_date: "{{ ansible_date_time.date }}"
+    update_source: "{{ fsx_mount }}/staging"
+    
+  pre_tasks:
+    - name: "Validar source dos updates"
+      stat:
+        path: "{{ update_source }}/webapps"
+      register: war_source
+      delegate_to: localhost
+      run_once: true
+      
+    - name: "Falhar se source não existir"
+      fail:
+        msg: "Source de WAR não encontrado: {{ update_source }}/webapps"
+      when: not war_source.stat.exists
+      delegate_to: localhost
+      run_once: true
+
+  tasks:
+    - name: "Criar diretório de backup"
+      file:
+        path: "{{ backup_base_dir }}/{{ deploy_date }}"
+        state: directory
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+        mode: '0755'
+      become: yes
+
+    - name: "Verificar status inicial do Tomcat"
+      systemd:
+        name: "{{ tomcat_service }}"
+      register: tomcat_initial_status
+
+    - name: "Backup dos WARs atuais"
+      shell: |
+        cd {{ tomcat_home }}/webapps
+        tar -czf {{ backup_base_dir }}/{{ deploy_date }}/{{ inventory_hostname }}_webapps_{{ deploy_timestamp }}.tar.gz \
+          --exclude=custom \
+          *.war 2>/dev/null || echo "Nenhum WAR para backup"
+      become: yes
+      register: backup_result
+      
+    - name: "Parar Tomcat gracefully"
+      systemd:
+        name: "{{ tomcat_service }}"
+        state: stopped
+      become: yes
+      register: tomcat_stop
+      
+    - name: "Aguardar Tomcat parar completamente"
+      wait_for:
+        port: "{{ tomcat_port }}"
+        state: stopped
+        timeout: 120
+        
+    - name: "Verificar se processo Tomcat foi finalizado"
+      shell: |
+        pgrep -f "{{ tomcat_home }}" || echo "Nenhum processo Tomcat encontrado"
+      register: tomcat_processes
+      become: yes
+      
+    - name: "Remover WARs antigos (preservando custom)"
+      shell: |
+        cd {{ tomcat_home }}/webapps
+        find . -maxdepth 1 -name "*.war" -not -path "./custom/*" -delete
+        find . -maxdepth 1 -type d -not -name "custom" -not -name "." -exec rm -rf {} + 2>/dev/null || true
+      become: yes
+
+    - name: "Sincronizar novos WARs do FSx"
+      synchronize:
+        src: "{{ update_source }}/webapps/"
+        dest: "{{ tomcat_home }}/webapps/"
+        delete: no  # Não deletar custom
+        rsync_opts:
+          - "--exclude=custom"
+          - "--chown={{ tomcat_user }}:{{ tomcat_user }}"
+      become: yes
+      
+    - name: "Definir permissões corretas"
+      file:
+        path: "{{ tomcat_home }}/webapps"
+        owner: "{{ tomcat_user }}"
+        group: "{{ tomcat_user }}"
+        mode: '0755'
+        recurse: yes
+      become: yes
+      
+    - name: "Iniciar Tomcat"
+      systemd:
+        name: "{{ tomcat_service }}"
+        state: started
+        enabled: yes
+      become: yes
+      
+    - name: "Aguardar Tomcat inicializar"
+      wait_for:
+        port: "{{ tomcat_port }}"
+        timeout: "{{ deploy_timeout }}"
+        
+    - name: "Aguardar deploy dos WARs (monitoring logs)"
+      shell: |
+        timeout 300 tail -f {{ tomcat_log_file }} | while read line; do
+          echo "$line" | grep -q "Deployment of web application" && break
+        done 2>/dev/null || echo "Timeout aguardando deploy"
+      become: yes
+      register: war_deployment
+      
+    - name: "Health check da aplicação"
+      uri:
+        url: "https://{{ ansible_default_ipv4.address }}:{{ tomcat_port }}/totvs-menu"
+        method: GET
+        status_code: [200, 302, 301]  # Aceitar redirecionamentos
+        timeout: 30
+        validate_certs: no
+      register: health_check_result
+      retries: "{{ health_check_retries }}"
+      delay: "{{ health_check_delay }}"
+      ignore_errors: yes
+      
+    - name: "Verificar logs de erro no Tomcat"
+      shell: |
+        tail -50 {{ tomcat_log_file }} | grep -i "error\|exception\|failed" | tail -5
+      become: yes
+      register: tomcat_errors
+      ignore_errors: yes
+      
+    - name: "Relatório de deploy"
+      debug:
+        msg: |
+          ===========================================
+          DEPLOY WAR COMPLETO - {{ inventory_hostname }}
+          ===========================================
+          Status Tomcat: {{ 'OK' if tomcat_stop.changed else 'ERRO' }}
+          Health Check: {{ 'OK' if health_check_result.status == 200 else 'ALERTA' }}
+          Backup: {{ backup_base_dir }}/{{ deploy_date }}/{{ inventory_hostname }}_webapps_{{ deploy_timestamp }}.tar.gz
+          Timestamp: {{ deploy_timestamp }}
+          {% if tomcat_errors.stdout %}
+          Erros encontrados nos logs:
+          {{ tomcat_errors.stdout }}
+          {% endif %}
+          ===========================================
+
+  post_tasks:
+    - name: "Limpeza de backups antigos"
+      find:
+        paths: "{{ backup_base_dir }}"
+        age: "{{ backup_retention_days }}d"
+        file_type: file
+        patterns: "*.tar.gz"
+      register: old_backups
+      become: yes
+      
+    - name: "Remover backups antigos"
+      file:
+        path: "{{ item.path }}"
+        state: absent
+      loop: "{{ old_backups.files }}"
+      become: yes
+      when: old_backups.files is defined
