@@ -34,6 +34,7 @@
           ==========================================
           ATENÇÃO: DEPLOY DE VERSÃO COMPLETA
           ==========================================
+          Projeto: {{ project_name }}
           Servidor: {{ inventory_hostname }}
           
           Diretórios que serão atualizados:
@@ -192,6 +193,7 @@
           ===============================================
           DEPLOY DE VERSÃO COMPLETO - {{ inventory_hostname }}
           ===============================================
+          Projeto: {{ project_name }}
           Backup Completo: {{ backup_base_dir }}/version/{{ deploy_date }}/{{ inventory_hostname }}_full_backup_{{ deploy_timestamp }}.tar.gz
           Custom Preservado: {{ 'SIM' if custom_restore.stdout is search('sucesso') else 'N/A' }}
           Health Check: {{ 'OK' if version_health_check.status == 200 else 'NECESSITA VERIFICAÇÃO' }}

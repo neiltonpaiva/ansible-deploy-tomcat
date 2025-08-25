@@ -9,3 +9,7 @@ log_aggregation: true
 # Configurações de backup específicas
 backup_before_deploy: true
 backup_compress: true
+
+# Configurações específicas do projeto
+project_name: "ansible-deploy-tomcat"
+deployment_user: "ansible"

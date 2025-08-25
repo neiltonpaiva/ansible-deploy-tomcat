@@ -141,6 +141,7 @@
           Health Check: {{ 'OK' if health_check_result.status == 200 else 'ALERTA' }}
           Backup: {{ backup_base_dir }}/{{ deploy_date }}/{{ inventory_hostname }}_webapps_{{ deploy_timestamp }}.tar.gz
           Timestamp: {{ deploy_timestamp }}
+          Projeto: {{ project_name }}
           {% if tomcat_errors.stdout %}
           Erros encontrados nos logs:
           {{ tomcat_errors.stdout }}
